@@ -60,6 +60,68 @@ typedef struct WaitThreadParam {
 
 ProcessList process_list;
 
+struct Options {
+    BOOL bind_global;
+    int port;
+    wchar_t *cmdline;
+} options = {
+    .bind_global = FALSE,
+    .port = 8023,
+    .cmdline = L"cmd.exe"
+};
+
+void Help(void) {
+    printf(
+        "Usage: rshelld [OPTION]...\n"
+        "Listen for TCP connections and run shell with input/output connected to socket.\n"
+        "\n"
+        "Options:\n"
+        "  -c cmdline\tProgram with arguments to run upon connection.\n"
+        "            \tUse \"quotes\" if command line contains spaces. Default: cmd.exe\n"
+        "  -g\t\tListen on all interfaces (0.0.0.0).\n"
+        "    \t\tDefault: Listen only on localhost (127.0.0.1).\n"
+        "  -p port\tListen on the specified port. Default: 8023\n"
+        "  -h, --help\tDisplay this help and exit\n"
+        "\n"
+        "Examples:\n"
+        "  rshelld\t\tListen on port 8023 on localhost only, run cmd.exe\n"
+        "  rshelld -p 1234 -g\tListen on port 1234 on all interfaces, run cmd.exe\n"
+        "  rshelld -c powershell\tRun powershell.exe instead of cmd.exe\n"
+    );
+    exit(1);
+}
+
+void ParseArgs(int argc, wchar_t *argv[]) {
+    while (*++argv) {
+        if (!wcscmp(argv[0], L"-h") || !wcscmp(argv[0], L"--help") || !wcscmp(argv[0], L"/?")) {
+            Help();
+        } else if (!wcscmp(argv[0], L"-g")) {
+            options.bind_global = TRUE;
+        } else if (!wcscmp(argv[0], L"-p")) {
+            if (!argv[1]) {
+                Help();
+            }
+            argv++;
+            wchar_t *end;
+            long port = wcstol(argv[0], &end, 10);
+            if (*end != L'\0' || port < 1 || port > 65535) {
+                printf("Bad port %S\n", argv[0]);
+                Help();
+            }
+            options.port = port;
+        } else if (!wcscmp(argv[0], L"-c")) {
+            if (!argv[1]) {
+                Help();
+            }
+            argv++;
+            options.cmdline = argv[0];
+        } else {
+            printf("Unknown argument '%S'\n", argv[0]);
+            Help();
+        }
+    }
+}
+
 void ProcessListInit(ProcessList *list) {
     InitializeCriticalSection(&list->lock);
     list->list = NULL;
@@ -227,7 +289,7 @@ HANDLE LaunchProcess(const wchar_t *cmdline, HPCON hConsole, HANDLE in, HANDLE o
     return pi.hProcess;
 }
 
-SOCKET CreateListeningSocket(const char *addrstr, int port) {
+SOCKET CreateListeningSocket(BOOL bind_global, int port) {
     WSADATA wsaData;
     int res = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (res != 0) {
@@ -245,11 +307,11 @@ SOCKET CreateListeningSocket(const char *addrstr, int port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = ntohl(0x7f000001);
+    addr.sin_addr.s_addr = bind_global ? 0 : ntohl(0x7f000001);
     addr.sin_port = ntohs(port);
     res = bind(s, (struct sockaddr *)&addr, sizeof(addr));
     if (res != 0) {
-        printf("bind() failed: %d\n", WSAGetLastError());
+        printf("bind() on port %d failed: %d\n", port, WSAGetLastError());
         closesocket(s);
         WSACleanup();
         return INVALID_SOCKET;
@@ -355,6 +417,8 @@ DWORD WINAPI WaitThread(LPVOID param) {
 }
 
 int wmain(int argc, wchar_t *argv[]) {
+    ParseArgs(argc, argv);
+
     HMODULE hLib = LoadLibrary(L"kernel32.dll");
     FARPROC proc = GetProcAddress(hLib, "CreatePseudoConsole");
     if (!proc) {
@@ -365,7 +429,7 @@ int wmain(int argc, wchar_t *argv[]) {
     CreatePseudoConsole = (CreatePseudoConsoleProc)proc;
     ClosePseudoConsole = (ClosePseudoConsoleProc)GetProcAddress(hLib, "ClosePseudoConsole");
 
-    SOCKET accept_socket = CreateListeningSocket("127.0.0.1", 8023);
+    SOCKET accept_socket = CreateListeningSocket(options.bind_global, options.port);
     if (accept_socket == INVALID_SOCKET) {
         return 1;
     }
@@ -373,7 +437,8 @@ int wmain(int argc, wchar_t *argv[]) {
     ProcessListInit(&process_list);
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
 
-    printf("Listening on %s:%d, press Ctrl+C to stop\n", "127.0.0.1", 8023);
+    printf("Listening on %s:%d, press Ctrl+C to stop\n",
+        options.bind_global ? "0.0.0.0" : "127.0.0.1", options.port);
 
     while (1) {
         Console console;
@@ -407,9 +472,9 @@ int wmain(int argc, wchar_t *argv[]) {
             goto err;
         }
 
-        process = LaunchProcess(L"cmd.exe", console.hConsole, in, out, &si);
+        process = LaunchProcess(options.cmdline, console.hConsole, in, out, &si);
         if (!process) {
-            printf("Can't launch process: %u\n", GetLastError());
+            printf("Can't launch process %S: %u\n", options.cmdline, GetLastError());
             goto err;
         }
 
