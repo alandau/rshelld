@@ -64,10 +64,13 @@ struct Options {
     BOOL bind_global;
     int port;
     wchar_t *cmdline;
+    int sizex, sizey;
 } options = {
     .bind_global = FALSE,
     .port = 8023,
-    .cmdline = L"cmd.exe"
+    .cmdline = L"cmd.exe",
+    .sizex = 80,
+    .sizey = 24
 };
 
 void Help(void) {
@@ -81,6 +84,7 @@ void Help(void) {
         "  -g\t\tListen on all interfaces (0.0.0.0).\n"
         "    \t\tDefault: Listen only on localhost (127.0.0.1).\n"
         "  -p port\tListen on the specified port. Default: 8023\n"
+        "  -s WxH\tTerminal size in characters. Default: 80x24\n"
         "  -h, --help\tDisplay this help and exit\n"
         "\n"
         "Examples:\n"
@@ -115,6 +119,25 @@ void ParseArgs(int argc, wchar_t *argv[]) {
             }
             argv++;
             options.cmdline = argv[0];
+        } else if (!wcscmp(argv[0], L"-s")) {
+            if (!argv[1]) {
+                Help();
+            }
+            argv++;
+            wchar_t *x = wcschr(argv[0], L'x');
+            if (!x || *(x + 1) == L'\0') {
+                printf("Bad terminal size %S\n", argv[0]);
+                Help();
+            }
+            wchar_t *end1, *end2;
+            long sizex = wcstol(argv[0], &end1, 10);
+            long sizey = wcstol(x + 1, &end2, 10);
+            if (end1 != x || *end2 != L'\0' || sizex <= 0 || sizey <= 0) {
+                printf("Bad terminal size %S\n", argv[0]);
+                Help();
+            }
+            options.sizex = sizex;
+            options.sizey = sizey;
         } else {
             printf("Unknown argument '%S'\n", argv[0]);
             Help();
@@ -205,7 +228,7 @@ BOOL CreateConsole(Console *console, HANDLE *inputRead, HANDLE *outputWrite) {
     }
 
     HPCON hPC;
-    COORD size = { 80, 24 };
+    COORD size = { options.sizex, options.sizey };
     HRESULT hr = CreatePseudoConsole(size, inRead, outWrite, 0, &hPC);
     if (FAILED(hr)) {
         SetLastError(hr);
