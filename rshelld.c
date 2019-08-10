@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
 #define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
@@ -26,6 +27,17 @@ typedef void (WINAPI *ClosePseudoConsoleProc)(
 CreatePseudoConsoleProc CreatePseudoConsole;
 ClosePseudoConsoleProc ClosePseudoConsole;
 
+typedef struct ProcessListNode {
+    HANDLE process;
+    HANDLE waitthead;
+    struct ProcessListNode *next;
+} ProcessListNode;
+
+typedef struct ProcessList {
+    CRITICAL_SECTION lock;
+    ProcessListNode *list;
+} ProcessList;
+
 typedef struct Console {
     HPCON hConsole;
     HANDLE in;
@@ -45,6 +57,78 @@ typedef struct WaitThreadParam {
     HANDLE stdinthread, stdoutthread;
     SOCKET sock;
 } WaitThreadParam;
+
+ProcessList process_list;
+
+void ProcessListInit(ProcessList *list) {
+    InitializeCriticalSection(&list->lock);
+    list->list = NULL;
+}
+
+void ProcessListAdd(ProcessList *list, HANDLE process, HANDLE waitthread) {
+    ProcessListNode *node = malloc(sizeof(ProcessListNode));
+    EnterCriticalSection(&list->lock);
+    node->process = process;
+    node->waitthead = waitthread;
+    node->next = list->list;
+    list->list = node;
+    LeaveCriticalSection(&list->lock);
+}
+
+void ProcessListRemove(ProcessList *list, HANDLE process, HANDLE *waitthread) {
+    if (waitthread) {
+        *waitthread = NULL;
+    }
+    EnterCriticalSection(&list->lock);
+    if (list->list == NULL) {
+        // Empty, do nothing
+        assert(0);
+    } else if (list->list->process == process) {
+        // First, move head pointer
+        ProcessListNode *cur = list->list;
+        list->list = list->list->next;
+        if (waitthread) {
+            *waitthread = cur->waitthead;
+        }
+        free(cur);
+    } else {
+        ProcessListNode *prev = list->list;
+        for (ProcessListNode *cur = prev->next; cur; prev = cur, cur = cur->next) {
+            if (cur->process == process) {
+                prev->next = cur->next;
+                if (waitthread) {
+                    *waitthread = cur->waitthead;
+                }
+                free(cur);
+            }
+        }
+    }
+    LeaveCriticalSection(&list->lock);
+}
+
+BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
+    EnterCriticalSection(&process_list.lock);
+    while (process_list.list != NULL) {
+        HANDLE process = process_list.list->process;
+        HANDLE waitthread;
+        // We need to duplicate the waitthread handle, since it will be
+        // closed by WaitThread during our WaitForSingleObject, which
+        // is undefined
+        DuplicateHandle(GetCurrentProcess(), process_list.list->waitthead, GetCurrentProcess(), &waitthread,
+            0, FALSE, DUPLICATE_SAME_ACCESS);
+        LeaveCriticalSection(&process_list.lock);
+
+        TerminateProcess(process, 0);
+        WaitForSingleObject(waitthread, INFINITE);
+        CloseHandle(waitthread);
+
+        EnterCriticalSection(&process_list.lock);
+    }
+    LeaveCriticalSection(&process_list.lock);
+
+    // FALSE means unhandled, so next (default) handler will terminate process
+    return FALSE;
+}
 
 BOOL CreateConsole(Console *console, HANDLE *inputRead, HANDLE *outputWrite) {
     HANDLE inRead = NULL, inWrite = NULL;
@@ -242,6 +326,10 @@ DWORD WINAPI WaitThread(LPVOID param) {
     WaitThreadParam *args = (WaitThreadParam *)param;
     WaitForSingleObject(args->process, INFINITE);
 
+    HANDLE myself;
+    ProcessListRemove(&process_list, args->process, &myself);
+    CloseHandle(myself);
+
     struct sockaddr_in addr;
     int addrlen = sizeof(addr);
     getpeername(args->sock, (struct sockaddr *)&addr, &addrlen);
@@ -279,6 +367,9 @@ int wmain(int argc, wchar_t *argv[]) {
     if (accept_socket == INVALID_SOCKET) {
         return 1;
     }
+
+    ProcessListInit(&process_list);
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
 
     printf("Listening on %s:%d, press Ctrl+C to stop\n", "127.0.0.1", 8023);
 
@@ -350,7 +441,7 @@ int wmain(int argc, wchar_t *argv[]) {
             goto err;
         }
 
-        CloseHandle(waitthread);
+        ProcessListAdd(&process_list, process, waitthread);
         continue;
 
     err:
