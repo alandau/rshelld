@@ -1,6 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <Windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -245,7 +245,7 @@ SOCKET CreateListeningSocket(const char *addrstr, int port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(addrstr);
+    addr.sin_addr.s_addr = ntohl(0x7f000001);
     addr.sin_port = ntohs(port);
     res = bind(s, (struct sockaddr *)&addr, sizeof(addr));
     if (res != 0) {
@@ -347,7 +347,9 @@ DWORD WINAPI WaitThread(LPVOID param) {
     // it to terminate process to signal us
     CloseHandle(args->process);
 
-    printf("Closed connection from %s:%d\n", inet_ntoa(addr.sin_addr), htons(addr.sin_port));
+    char addrstr[100];
+    inet_ntop(addr.sin_family, &addr.sin_addr, addrstr, sizeof(addrstr));
+    printf("Closed connection from %s:%d\n", addrstr, ntohs(addr.sin_port));
     free(args);
     return 0;
 }
@@ -389,7 +391,9 @@ int wmain(int argc, wchar_t *argv[]) {
             continue;
         }
 
-        printf("Connection from %s:%d\n", inet_ntoa(addr.sin_addr), htons(addr.sin_port));
+        char addrstr[100];
+        inet_ntop(addr.sin_family, &addr.sin_addr, addrstr, sizeof(addrstr));
+        printf("Connection from %s:%d\n", addrstr, htons(addr.sin_port));
 
         HANDLE in, out;
         if (!CreateConsole(&console, &in, &out)) {
